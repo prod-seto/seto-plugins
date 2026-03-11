@@ -1,0 +1,11 @@
+{
+    "CmajorVersion": 1,
+    "ID": "com.seto.smack",
+    "version": "1.0",
+    "name": "smack",
+    "description": "Mackie 1202 console character. Conversion of Mackity by Airwindows into Cmajor code.",
+    "manufacturer": "seto",
+    "category": "effect",
+    "isInstrument": false,
+    "source": "smack.cmajor"
+}

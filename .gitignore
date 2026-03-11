@@ -1,0 +1,15 @@
+# Build output only — generated source is committed
+builds/
+build/
+*_artefacts/
+*.vst3
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user

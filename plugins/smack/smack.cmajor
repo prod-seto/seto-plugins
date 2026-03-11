@@ -1,0 +1,158 @@
+processor smack
+{
+    input stream float<2> in;
+    output stream float<2> out;
+
+    input event float param1 [[ name: "Input Gain",   min: 0.0, max: 1.0, init: 0.5 ]];
+    input event float param2 [[ name: "Output Level", min: 0.0, max: 1.0, init: 1.0 ]];
+    input event float param3 [[ name: "Mix",          min: 0.0, max: 1.0, init: 1.0 ]];
+
+    float inTrim   = 25.0f;
+    float padState = 1.0f;
+    float mixState = 1.0f;
+
+    event param1 (float v)
+    {
+        let t = v * 10.0f;
+        inTrim = t * t;
+    }
+    event param2 (float v) { padState = v; }
+    event param3 (float v) { mixState = v; }
+
+    // --- Mackity IIR states ---
+    float iirSampleAL = 0.0f; float iirSampleAR = 0.0f;
+    float iirSampleBL = 0.0f; float iirSampleBR = 0.0f;
+
+    // --- Biquad A ---
+    float bqA_b0 = 0.0f; float bqA_b1 = 0.0f; float bqA_b2 = 0.0f;
+    float bqA_a1 = 0.0f; float bqA_a2 = 0.0f;
+    float bqA_x1L = 0.0f; float bqA_x2L = 0.0f;
+    float bqA_y1L = 0.0f; float bqA_y2L = 0.0f;
+    float bqA_x1R = 0.0f; float bqA_x2R = 0.0f;
+    float bqA_y1R = 0.0f; float bqA_y2R = 0.0f;
+
+    // --- Biquad B ---
+    float bqB_b0 = 0.0f; float bqB_b1 = 0.0f; float bqB_b2 = 0.0f;
+    float bqB_a1 = 0.0f; float bqB_a2 = 0.0f;
+    float bqB_x1L = 0.0f; float bqB_x2L = 0.0f;
+    float bqB_y1L = 0.0f; float bqB_y2L = 0.0f;
+    float bqB_x1R = 0.0f; float bqB_x2R = 0.0f;
+    float bqB_y1R = 0.0f; float bqB_y2R = 0.0f;
+
+    void main()
+    {
+        let sr = float (processor.frequency);
+
+        // --- Mackity IIR coefficients ---
+        let overallScale = sr / 44100.0f;
+        let iirAmountA   = 0.001860867f / overallScale;
+        let iirAmountB   = 0.000287496f / overallScale;
+        let iirDecayA    = 1.0f - iirAmountA;
+        let iirDecayB    = 1.0f - iirAmountB;
+
+        let freq  = 19160.0f / sr;
+        let K     = float (tan (float64 (3.14159265358979323846) * float64 (freq)));
+        let KK    = K * K;
+        let KKm1x2 = 2.0f * (KK - 1.0f);
+
+        // Biquad A (Q = 0.431684981684982)
+        let QA     = 0.431684981684982f;
+        let normA  = 1.0f / (1.0f + K / QA + KK);
+        bqA_b0 = KK * normA;
+        bqA_b1 = 2.0f * bqA_b0;
+        bqA_b2 = bqA_b0;
+        bqA_a1 = KKm1x2 * normA;
+        bqA_a2 = (1.0f - K / QA + KK) * normA;
+
+        // Biquad B (Q = 1.1582298) — reuses K, KK, KKm1x2
+        let QB     = 1.1582298f;
+        let normB  = 1.0f / (1.0f + K / QB + KK);
+        bqB_b0 = KK * normB;
+        bqB_b1 = 2.0f * bqB_b0;
+        bqB_b2 = bqB_b0;
+        bqB_a1 = KKm1x2 * normB;
+        bqB_a2 = (1.0f - K / QB + KK) * normB;
+
+        loop
+        {
+            let dryL = in[0];
+            let dryR = in[1];
+
+            var sL = dryL;
+            var sR = dryR;
+
+            // -------------------------------------------------------
+            // IIR A — high-pass DC block (pre-trim)
+            // -------------------------------------------------------
+            iirSampleAL = iirSampleAL * iirDecayA + sL * iirAmountA;
+            sL -= iirSampleAL;
+            iirSampleAR = iirSampleAR * iirDecayA + sR * iirAmountA;
+            sR -= iirSampleAR;
+
+            // Input trim (precomputed in event handler)
+            sL *= inTrim;
+            sR *= inTrim;
+
+            // -------------------------------------------------------
+            // Biquad A — lowpass DF1
+            // -------------------------------------------------------
+            let outAL = bqA_b0 * sL + bqA_b1 * bqA_x1L + bqA_b2 * bqA_x2L
+                      - bqA_a1 * bqA_y1L - bqA_a2 * bqA_y2L;
+            bqA_x2L = bqA_x1L; bqA_x1L = sL;
+            bqA_y2L = bqA_y1L; bqA_y1L = outAL;
+            sL = outAL;
+
+            let outAR = bqA_b0 * sR + bqA_b1 * bqA_x1R + bqA_b2 * bqA_x2R
+                      - bqA_a1 * bqA_y1R - bqA_a2 * bqA_y2R;
+            bqA_x2R = bqA_x1R; bqA_x1R = sR;
+            bqA_y2R = bqA_y1R; bqA_y1R = outAR;
+            sR = outAR;
+
+            // -------------------------------------------------------
+            // Saturation — x^5 via explicit multiply chain
+            // -------------------------------------------------------
+            if (sL >  1.0f) { sL =  1.0f; }
+            if (sL < -1.0f) { sL = -1.0f; }
+            let sL2 = sL * sL;
+            sL -= sL2 * sL2 * sL * 0.1768f;
+
+            if (sR >  1.0f) { sR =  1.0f; }
+            if (sR < -1.0f) { sR = -1.0f; }
+            let sR2 = sR * sR;
+            sR -= sR2 * sR2 * sR * 0.1768f;
+
+            // -------------------------------------------------------
+            // Biquad B — lowpass DF1
+            // -------------------------------------------------------
+            let outBL = bqB_b0 * sL + bqB_b1 * bqB_x1L + bqB_b2 * bqB_x2L
+                      - bqB_a1 * bqB_y1L - bqB_a2 * bqB_y2L;
+            bqB_x2L = bqB_x1L; bqB_x1L = sL;
+            bqB_y2L = bqB_y1L; bqB_y1L = outBL;
+            sL = outBL;
+
+            let outBR = bqB_b0 * sR + bqB_b1 * bqB_x1R + bqB_b2 * bqB_x2R
+                      - bqB_a1 * bqB_y1R - bqB_a2 * bqB_y2R;
+            bqB_x2R = bqB_x1R; bqB_x1R = sR;
+            bqB_y2R = bqB_y1R; bqB_y1R = outBR;
+            sR = outBR;
+
+            // -------------------------------------------------------
+            // IIR B — high-pass DC block (post-saturation)
+            // -------------------------------------------------------
+            iirSampleBL = iirSampleBL * iirDecayB + sL * iirAmountB;
+            sL -= iirSampleBL;
+            iirSampleBR = iirSampleBR * iirDecayB + sR * iirAmountB;
+            sR -= iirSampleBR;
+
+            sL *= padState;
+            sR *= padState;
+
+            // -------------------------------------------------------
+            // Dry / wet mix
+            // -------------------------------------------------------
+            out <- float<2> (dryL + mixState * (sL - dryL),
+                             dryR + mixState * (sR - dryR));
+            advance();
+        }
+    }
+}
